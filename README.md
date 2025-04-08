@@ -62,7 +62,3 @@ The script will check for upcoming assignments daily at the specified hour and m
 ## Contributing
 
 Contributions are welcome! Please open an issue or submit a pull request for any improvements or bug fixes.
-
-## License
-
-This project is licensed under the MIT License. See the LICENSE file for details.
