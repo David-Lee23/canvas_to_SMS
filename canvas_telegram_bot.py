@@ -524,9 +524,11 @@ async def main() -> None:
 
     # Schedule daily check using Telegram's job queue
     if target_chat_id and target_chat_id.lstrip('-').isdigit():
+        # Ensure the timezone object is available for the scheduler
+        target_tz = application.user_data['target_tz']  # Get it from user_data
         application.job_queue.run_daily(
             scheduled_assignment_check,
-            time=time(hour=check_hour, minute=check_minute),
+            time=time(hour=check_hour, minute=check_minute, tzinfo=target_tz),  # Make time timezone-aware
             name="daily_assignment_check",
             job_kwargs={"misfire_grace_time": 3600}
         )
@@ -541,22 +543,17 @@ async def main() -> None:
 
 if __name__ == "__main__":
     try:
-        # On Windows, we need to use a different event loop policy
-        if os.name == 'nt':  # Windows
+        # On Windows, set the event loop policy *before* running anything
+        if os.name == 'nt':
             import asyncio
             from asyncio import WindowsSelectorEventLoopPolicy
             asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())
-        
-        # Create new event loop and run the application
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(main())
+
+        # Use asyncio.run() to manage the event loop and run the main coroutine
+        asyncio.run(main())
+
     except KeyboardInterrupt:
         logger.info("Bot stopped manually.")
     except Exception as e:
-        logger.critical(f"Critical error in main execution loop: {e}", exc_info=True)
-    finally:
-        try:
-            loop.close()
-        except:
-            pass
+        # Log critical errors that might occur outside the main() try/except
+        logger.critical(f"Critical error during bot execution: {e}", exc_info=True)
