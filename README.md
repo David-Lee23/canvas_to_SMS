@@ -1,14 +1,24 @@
-# Canvas Assignment Notifier
+# Canvas Assignment Notifier (AI-Enhanced)
 
 ## Overview
 
-The Canvas Assignment Notifier is a Python script that connects to the Canvas API to fetch upcoming assignments and sends SMS notifications using an email-to-SMS gateway. This project is designed to help students stay informed about their assignments and deadlines.
+The Canvas Assignment Notifier is a Python script that connects to the Canvas API to fetch upcoming assignments and sends intelligent SMS notifications using an email-to-SMS gateway. The script uses AI to estimate completion times for assignments, helping students better plan their workload.
 
 ## Features
 
-- Fetches upcoming assignments from the Canvas API.
-- Sends SMS notifications for assignments due within a specified timeframe.
-- Configurable settings for notification timing and recipient information.
+- Fetches upcoming assignments from the Canvas API
+- Uses Mistral AI to estimate assignment completion times
+- Sends smart SMS notifications with time estimates
+- Intelligent message chunking for long notifications
+- Configurable settings for notification timing
+- Timezone-aware scheduling (EST/EDT)
+
+## Requirements
+
+- Python 3.9+
+- Canvas API access
+- Email account for SMS gateway
+- Ollama with Mistral model installed
 
 ## Setup Instructions
 
