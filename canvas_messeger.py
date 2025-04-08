@@ -45,6 +45,10 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 import smtplib
 from email.mime.text import MIMEText
+import ollama 
+import re  # Add this with other imports at the top
+import time  # Add with other imports
+
 
 # --- Configuration ---
 
@@ -139,6 +143,57 @@ def parse_iso_datetime(date_string: Optional[str]) -> Optional[datetime]:
         logging.error(f"Unexpected error parsing date string '{date_string}': {e}")
         return None
 
+def estimate_time_via_ai(
+    course_name: str,
+    assignment_name: str,
+    due_date: datetime,
+    description: str,
+    url: Optional[str] = None
+) -> Optional[float]:
+    """
+    Use AI (Mistral via Ollama) to estimate assignment completion time with full context.
+    Returns estimated hours as float, or None if estimation fails.
+    """
+    if not description:
+        return None
+        
+    try:
+        # Build rich context prompt
+        prompt = (
+            f"You're an AI assistant helping a college student estimate how long each assignment will take.\n\n"
+            f"Here is an assignment:\n"
+            f"Course: {course_name}\n"
+            f"Title: {assignment_name}\n"
+            f"Due Date: {due_date.strftime('%A, %B %d, %Y at %I:%M %p')}\n"
+        )
+
+        if url:
+            prompt += f"Assignment URL: {url}\n"
+
+        prompt += f"\nDescription:\n{description}\n\n"
+        prompt += "Based on this, estimate how many hours the student will likely need to complete it. "
+        prompt += "Respond with only a single number like '2' or '3.5'."
+
+        response = ollama.chat(
+            model="mistral",
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        text = response['message']['content'].strip()
+        logging.debug(f"AI response for time estimate: {text}")
+
+        match = re.search(r"(\d+(\.\d+)?)", text)
+        if match:
+            estimated_hours = float(match.group(1))
+            return round(estimated_hours, 1)
+
+        logging.warning(f"No valid number found in AI response: {text}")
+        return None
+
+    except Exception as e:
+        logging.warning(f"AI time estimate failed: {e}")
+        return None
+
 
 # --- Core Logic ---
 
@@ -172,20 +227,27 @@ def fetch_upcoming_assignments(
     for course in courses:
         try:
             logging.debug(f"Processing course: {getattr(course, 'name', 'N/A')} (ID: {course.id})")
-            # Fetch assignments for the course. Consider using parameters like 'bucket=upcoming'
-            # if it suits your needs, but manual filtering gives more date control.
             assignments = course.get_assignments()
             for assignment in assignments:
                 due_datetime_utc = parse_iso_datetime(getattr(assignment, 'due_at', None))
 
-                # Consider only assignments with valid due dates within the threshold
                 if due_datetime_utc and now_est <= due_datetime_utc <= due_threshold_est:
+                    description = getattr(assignment, 'description', assignment.name)
+                    estimated_hours = estimate_time_via_ai(
+                        course_name=getattr(course, 'name', 'Unknown Course'),
+                        assignment_name=getattr(assignment, 'name', 'Unnamed Assignment'),
+                        due_date=due_datetime_utc,
+                        description=description,
+                        url=getattr(assignment, 'html_url', None)
+                    )
+                    
                     upcoming_assignments.append({
                         'course_name': getattr(course, 'name', 'Unknown Course'),
                         'assignment_name': getattr(assignment, 'name', 'Unnamed Assignment'),
                         'due_date_utc': due_datetime_utc,
-                        'description': getattr(assignment, 'description', "No description."),
-                        'html_url': getattr(assignment, 'html_url', '#') # Link to assignment
+                        'description': description,
+                        'html_url': getattr(assignment, 'html_url', '#'),
+                        'estimated_hours': estimated_hours
                     })
         except CanvasException as e:
             # Log error for specific course but continue with others
@@ -204,32 +266,46 @@ def fetch_upcoming_assignments(
 
 def format_notification_message(assignments: List[Dict[str, Any]], days_ahead: int) -> str:
     """
-    Create a plain-text SMS-safe message listing upcoming assignments.
+    Create a plain-text SMS-safe message listing upcoming assignments with time estimates.
+    Days are shown as: Today, Tomorrow, Monday, Tuesday, etc.
     """
     if not assignments:
         return f"No assignments due in next {days_ahead} days"
 
     message_lines = [f"Due in next {days_ahead} days:"]
+    
+    now_est = datetime.now(ZoneInfo("America/New_York"))
 
     for a in assignments:
-        # Format date more concisely
-        due_str = a['due_date_utc'].strftime("%m/%d %I:%M%p").lower()
+        due_date = a['due_date_utc']
         
-        # Shorten course name to make it more compact
+        # Format the day
+        if due_date.date() == now_est.date():
+            day_str = "Today"
+        elif due_date.date() == (now_est + timedelta(days=1)).date():
+            day_str = "Tomorrow"
+        else:
+            day_str = due_date.strftime("%A")  # Full day name (Monday, Tuesday, etc.)
+            
+        # Format the time
+        time_str = due_date.strftime("%I:%M%p").lower().lstrip('0')
+        
+        # Get course name
         course = a['course_name'].split(" - ")[-1][:20]
         
-        # Format each assignment on two lines for clarity
-        line = f"{a['assignment_name']}\n{course} - Due {due_str}"
+        # Add time estimate if available
+        est_str = f" | Est: {a['estimated_hours']}hrs" if a.get('estimated_hours') else ""
+        
+        # Combine into final format
+        line = f"{a['assignment_name']}\n{course} - {day_str} @ {time_str}{est_str}"
         message_lines.append(line)
 
-    # Join with double newlines for better readability on mobile
     full_message = "\n\n".join(message_lines)
-
-    # Conservative SMS length limit
+    
+    # Truncate if needed
     max_len = 1000
     if len(full_message) > max_len:
         truncated = full_message[:max_len]
-        # Find last complete assignment entry
         last_break = truncated.rstrip().rfind("\n\n")
         if last_break > 0:
             full_message = truncated[:last_break] + "\n\n[More assignments not shown]"
@@ -248,24 +324,69 @@ def send_sms_via_email(
     message_body: str
 ) -> bool:
     """
-    Sends an SMS via email-to-text gateway with SMS-safe formatting.
+    Sends SMS notifications via email gateway with smart chunking.
+    - Splits messages into SMS-safe chunks (~150 chars)
+    - Keeps header with first assignments
+    - Preserves assignment formatting
     """
     if not message_body:
         logging.warning("Message body is empty. Skipping email.")
         return False
 
-    try:
-        msg = MIMEText(message_body)
-        msg["From"] = sender_email
-        msg["To"] = sms_email
-        # Subject removed to prevent formatting issues
+    # Split on double newlines to keep assignments together
+    assignments = message_body.split("\n\n")
+    header = assignments[0]  # "Due in next X days:"
+    assignment_chunks = assignments[1:] if len(assignments) > 1 else []
+    
+    # Start first chunk with header
+    chunks = []
+    current_chunk = [header]  # Initialize with header
+    current_length = len(header)
+    
+    for assignment in assignment_chunks:
+        # Calculate length including newlines
+        assignment_len = len(assignment) + 2  # +2 for "\n\n"
+        
+        # If this assignment would exceed SMS limit, start new chunk
+        if current_length + assignment_len > 150:  # Leave room for (1/N) prefix
+            if current_chunk:
+                chunks.append("\n\n".join(current_chunk))
+            current_chunk = [assignment]
+            current_length = len(assignment)
+        else:
+            current_chunk.append(assignment)
+            current_length += assignment_len
+    
+    # Don't forget the last chunk
+    if current_chunk:
+        chunks.append("\n\n".join(current_chunk))
 
+    try:
         with smtplib.SMTP(smtp_server, port) as server:
             server.starttls()
             server.login(sender_email, password)
-            server.sendmail(sender_email, sms_email, msg.as_string())
 
-        logging.info(f"SMS email sent successfully to {sms_email}")
+            total_chunks = len(chunks)
+            for i, chunk in enumerate(chunks, 1):
+                # Add part number if multiple chunks
+                if total_chunks > 1:
+                    chunk = f"({i}/{total_chunks})\n{chunk}"
+
+                msg = MIMEText(chunk)
+                msg["From"] = sender_email
+                msg["To"] = sms_email
+                msg["Subject"] = ""  # Empty subject for SMS gateways
+
+                # Debug logging to see chunk contents
+                logging.debug(f"Chunk {i}/{total_chunks} content:\n{chunk}")
+
+                server.sendmail(sender_email, sms_email, msg.as_string())
+                logging.info(f"Sent SMS part {i}/{total_chunks} to {sms_email}")
+                
+                # Add slight delay between chunks to avoid carrier throttling
+                if i < total_chunks:
+                    time.sleep(1)
+
         return True
 
     except Exception as e:
