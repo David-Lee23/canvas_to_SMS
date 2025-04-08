@@ -1,0 +1,7 @@
+canvas-assignment-notifier
+├── src
+│   └── canvas_messenger.py
+├── .env.example
+├── .gitignore
+├── README.md
+└── requirements.txt
