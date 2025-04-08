@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone, time  # Added time import
 from typing import List, Dict, Optional, Any
 import re
 import asyncio # Needed for async operations with the bot library
+from asyncio import WindowsSelectorEventLoopPolicy
 import html # Needed for escaping HTML in descriptions
 
 # --- Third-Party Libraries ---
@@ -478,82 +479,136 @@ async def scheduled_assignment_check(context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as send_e:
              logger.error(f"Failed to send general error notification to Telegram: {send_e}")
 
-# --- Main Execution ---
-
 async def post_init(application: Application) -> None:
-    """Store configuration and timezone object in application context after init."""
-    config = load_configuration()
-    target_tz = ZoneInfo(config['APP_TIMEZONE'])
-    application.user_data['config'] = config
-    application.user_data['target_tz'] = target_tz
-    logger.info(f"Application initialized with timezone {config['APP_TIMEZONE']}")
+    """Initialize application with configuration and timezone after creation.
+    
+    Args:
+        application: The telegram bot application instance to initialize
+    """
+    try:
+        # Load and validate configuration
+        config = load_configuration()
+        target_tz = ZoneInfo(config['APP_TIMEZONE'])
+        
+        # Store config and timezone in application context
+        application.user_data['config'] = config
+        application.user_data['target_tz'] = target_tz
+        
+        logger.info(f"Application initialized with timezone {config['APP_TIMEZONE']}")
+    
+    except (EnvironmentError, ValueError) as e:
+        logger.error(f"Configuration error during post_init: {e}", exc_info=True)
+        raise RuntimeError(f"Failed to load configuration in post_init: {e}") from e
+    
+    except Exception as e:
+        logger.error(f"Unexpected error during post_init: {e}", exc_info=True)
+        raise RuntimeError(f"Unexpected error in post_init: {e}") from e
+
+# --- Main Execution Logic ---
 
 async def main() -> None:
-    """Set up and run the Telegram bot and scheduler."""
+    """Sets up the application, starts polling, and handles graceful shutdown."""
+    logger.info("Starting bot setup...")
+    application: Optional[Application] = None  # Define application here for broader scope in try/except/finally
 
-    # Load config early to ensure env vars are set
     try:
-        # Load config just to get token and schedule settings for setup
+        # 1. Load initial configuration (use this directly in main)
         temp_config = load_configuration()
         bot_token = temp_config['TELEGRAM_BOT_TOKEN']
-        check_hour = temp_config['CHECK_HOUR']
-        check_minute = temp_config['CHECK_MINUTE']
-        app_timezone_str = temp_config['APP_TIMEZONE']
-        target_chat_id = temp_config['TELEGRAM_CHAT_ID']
-    except (EnvironmentError, ValueError) as e:
-        logger.critical(f"Configuration error: {e}. Bot cannot start.", exc_info=True)
-        return
+        logger.info("Initial configuration loaded for setup.")
 
-    # Validate bot token
-    try:
+        # 2. Validate bot token
         logger.info("Validating Telegram Bot Token...")
         temp_bot = Bot(token=bot_token)
         await temp_bot.get_me()
         logger.info("Telegram Bot Token is valid.")
+
+        # 3. Build the application
+        logger.info("Building application instance...")
+        application = Application.builder().token(bot_token).post_init(post_init).build()
+        logger.info("Application instance built successfully.")
+
+        # 4. Use temp_config directly instead of retrieving from user_data
+        check_hour = temp_config['CHECK_HOUR']
+        check_minute = temp_config['CHECK_MINUTE']
+        app_timezone_str = temp_config['APP_TIMEZONE']
+        target_chat_id = temp_config['TELEGRAM_CHAT_ID']
+        target_tz = ZoneInfo(app_timezone_str)
+        logger.info("Configuration for scheduling retrieved.")
+
+        # 5. Register Command Handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("check", check_assignments_command))
+        logger.info("Command handlers registered.")
+
+        # 6. Schedule daily check
+        if target_chat_id and target_chat_id.lstrip('-').isdigit():
+            logger.info("Setting up scheduled job...")
+            application.job_queue.run_daily(
+                scheduled_assignment_check,
+                time=time(hour=check_hour, minute=check_minute, tzinfo=target_tz),
+                name="daily_assignment_check",
+                job_kwargs={"misfire_grace_time": 3600}
+            )
+            logger.info(f"Scheduled assignment check for chat ID {target_chat_id} daily at {check_hour:02d}:{check_minute:02d} ({app_timezone_str}).")
+        else:
+            logger.warning("TELEGRAM_CHAT_ID not set or invalid - Scheduled daily notifications are DISABLED.")
+
+        # --- Explicit Initialization and Start ---
+        logger.info("Initializing application components...")
+        await application.initialize()
+
+        logger.info("Starting application components (handlers, job queue)...")
+        await application.start()
+
+        logger.info("Starting polling...")
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+
+        logger.info("Bot is now running. Press Ctrl+C to stop.")
+
+        # Keep the main coroutine alive until interrupted
+        stop_event = asyncio.Event()
+        await stop_event.wait()
+
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Received stop signal (KeyboardInterrupt/SystemExit). Initiating shutdown...")
+
+    except (EnvironmentError, ValueError, RuntimeError, KeyError) as e:
+        logger.critical(f"Initialization or configuration error: {e}", exc_info=True)
+
     except Exception as e:
-        logger.critical(f"Invalid Telegram Bot Token or connection error: {e}. Bot cannot start.", exc_info=False)
-        return
+        logger.critical(f"Unhandled error during bot execution: {e}", exc_info=True)
 
-    # Initialize Telegram Application
-    application = Application.builder().token(bot_token).post_init(post_init).build()
+    finally:
+        logger.info("Shutdown sequence starting...")
+        if application:
+            # Check if updater exists before trying to stop it
+            if application.updater:
+                logger.info("Stopping polling...")
+                await application.updater.stop()
 
-    # Register Command Handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("check", check_assignments_command))
+            # Check if application components are running before stopping them
+            if application.running:
+                logger.info("Stopping application components...")
+                await application.stop()
 
-    # Schedule daily check using Telegram's job queue
-    if target_chat_id and target_chat_id.lstrip('-').isdigit():
-        # Ensure the timezone object is available for the scheduler
-        target_tz = application.user_data['target_tz']  # Get it from user_data
-        application.job_queue.run_daily(
-            scheduled_assignment_check,
-            time=time(hour=check_hour, minute=check_minute, tzinfo=target_tz),  # Make time timezone-aware
-            name="daily_assignment_check",
-            job_kwargs={"misfire_grace_time": 3600}
-        )
-        logger.info(f"Scheduled assignment check for chat ID {target_chat_id} daily at {check_hour:02d}:{check_minute:02d} ({app_timezone_str}).")
-    else:
-        logger.warning("TELEGRAM_CHAT_ID not set or invalid - Scheduled daily notifications are DISABLED.")
+            logger.info("Shutting down application...")
+            await application.shutdown()
+            logger.info("Application shutdown complete.")
+        else:
+            logger.info("Application object not created, skipping shutdown steps.")
 
-    # Run the bot
-    logger.info("Starting Telegram bot polling...")
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+# --- Main execution block ---
+if os.name == 'nt':
+    asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())
+    logger.info("Windows event loop policy set.")
 
-
-if __name__ == "__main__":
-    try:
-        # On Windows, set the event loop policy *before* running anything
-        if os.name == 'nt':
-            import asyncio
-            from asyncio import WindowsSelectorEventLoopPolicy
-            asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())
-
-        # Use asyncio.run() to manage the event loop and run the main coroutine
-        asyncio.run(main())
-
-    except KeyboardInterrupt:
-        logger.info("Bot stopped manually.")
-    except Exception as e:
-        # Log critical errors that might occur outside the main() try/except
-        logger.critical(f"Critical error during bot execution: {e}", exc_info=True)
+try:
+    asyncio.run(main())
+except KeyboardInterrupt:
+    logger.info("KeyboardInterrupt caught in outer block (likely during early setup).")
+except Exception as e:
+    logger.critical(f"Fatal error at top level: {e}", exc_info=True)
+finally:
+    logger.info("Script execution finished.")
