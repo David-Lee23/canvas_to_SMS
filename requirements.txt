@@ -1,9 +1,19 @@
+# Core dependencies
+python-telegram-bot>=20.8.0
+canvasapi>=3.2.0
+python-dotenv>=1.0.1
+APScheduler>=3.10.4
+ollama>=0.1.6
 
-canvasapi>=2.0.0
-python-dotenv>=1.0.0
-apscheduler>=3.10.1
-ollama>=0.1.0
-zoneinfo;python_version<"3.9"
-smtplib3>=0.0.1
-email-validator>=2.0.0
-typing-extensions>=4.5.0
+# Timezone support
+tzdata>=2024.1  # Required for ZoneInfo on Windows
+pytz>=2024.1    # Additional timezone support
+
+# Utility packages
+aiohttp>=3.9.3  # For async HTTP requests
+certifi>=2024.2.2  # For SSL certificate verification
+typing-extensions>=4.9.0
+
+# Optional but recommended
+python-dateutil>=2.8.2  # For robust date parsing
+urllib3>=2.2.1  # Required by several dependencies
