@@ -11,7 +11,7 @@ import ollama
 import os
 import logging
 from datetime import datetime, timedelta, timezone, time  # Added time import
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, cast
 import re
 import asyncio # Needed for async operations with the bot library
 from asyncio import WindowsSelectorEventLoopPolicy
@@ -23,7 +23,14 @@ from canvasapi.exceptions import CanvasException
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo # Modern timezone handling
 from telegram import Update, Bot # Core Telegram bot components
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters # Bot framework
+from telegram.ext import (
+    Application, 
+    CommandHandler, 
+    ContextTypes,
+    CallbackContext,
+    MessageHandler, 
+    filters
+) # Bot framework
 from telegram.error import TelegramError
 from telegram.constants import ParseMode # Import ParseMode constant
 
@@ -55,16 +62,23 @@ ENV_VARS = {
     "OLLAMA_MODEL": "mistral", # Default Ollama model
 }
 
+# --- Custom Context Class ---
+class CanvasContext(CallbackContext):
+    """Custom context class with Canvas configuration."""
+    def __init__(self, application, chat_id=None, user_id=None):
+        super().__init__(application, chat_id, user_id)
+        # These will be accessed from bot_data
+
 # --- Helper Functions ---
 
-def load_configuration() -> Dict[str, str]:
+def load_configuration() -> Dict[str, Any]:
     """Load configuration from environment variables."""
     config = {}
     missing_vars = []
     for var_name, default_value in ENV_VARS.items():
         value = os.environ.get(var_name, default_value)
-        if value is None and default_value is None: # Only error if no default is set
-             missing_vars.append(var_name)
+        if value is None and default_value is None:
+            missing_vars.append(var_name)
         else:
             config[var_name] = value if value is not None else default_value
 
@@ -81,27 +95,11 @@ def load_configuration() -> Dict[str, str]:
         if not (0 <= config["CHECK_HOUR"] <= 23 and 0 <= config["CHECK_MINUTE"] <= 59):
             raise ValueError("Invalid hour or minute")
     except ValueError as e:
-        error_msg = f"Invalid numeric configuration (DAYS_AHEAD, CHECK_HOUR, CHECK_MINUTE): {e}"
+        error_msg = f"Invalid numeric configuration: {e}"
         logger.error(error_msg)
         raise ValueError(error_msg)
 
-    # Validate timezone
-    try:
-        ZoneInfo(config["APP_TIMEZONE"])
-    except Exception as e:
-        error_msg = f"Invalid APP_TIMEZONE: {config['APP_TIMEZONE']}. Error: {e}"
-        logger.error(error_msg)
-        # Fallback to UTC if invalid timezone provided
-        logger.warning(f"Falling back to UTC timezone.")
-        config["APP_TIMEZONE"] = "UTC"
-
-
-    # Validate TELEGRAM_CHAT_ID (basic check)
-    if not config["TELEGRAM_CHAT_ID"].lstrip('-').isdigit():
-         logger.warning(f"TELEGRAM_CHAT_ID ('{config['TELEGRAM_CHAT_ID']}') doesn't look like a standard chat ID. Scheduled messages might fail if incorrect.")
-
-
-    logger.info("Configuration loaded successfully.")
+    logger.info(f"Configuration loaded successfully: {config}")  # Add debug logging
     return config
 
 def escape_markdown_v2(text: str) -> str:
@@ -332,7 +330,9 @@ def format_assignment_message(
             day_str = escape_markdown_v2(due_date.strftime("%A")) # Monday, Tuesday...
 
         # Format time: 5:00PM (no leading zero)
-        time_str = escape_markdown_v2(due_date.strftime("%-I:%M%p").lower()) # Use '-' for no padding on Linux/macOS
+        # Use '#' for no padding on Windows, '-' for Unix-like systems
+        format_spec = "%-I:%M%p" if os.name != 'nt' else "%#I:%M%p"
+        time_str = escape_markdown_v2(due_date.strftime(format_spec).lower())
 
         # Add estimate if available
         est_str = ""
@@ -361,7 +361,7 @@ def format_assignment_message(
 
 # --- Telegram Bot Commands and Logic ---
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start_command(update: Update, context: CanvasContext) -> None:
     """Sends a welcome message when the /start command is issued."""
     user = update.effective_user
     chat_id = update.effective_chat.id
@@ -380,7 +380,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"Your Chat ID for scheduled messages is: `{chat_id}` (add this to your `.env` file if needed)."
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: Update, context: CanvasContext) -> None:
     """Sends a help message when the /help command is issued."""
     logger.info(f"Received /help command from user {update.effective_user.username}")
     await update.message.reply_html(
@@ -391,48 +391,109 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "I will also send a scheduled summary every morning if configured."
     )
 
-async def check_assignments_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def check_assignments_command(update: Update, context: CanvasContext) -> None:
     """Handles the /check command to manually fetch and send assignments."""
     chat_id = update.effective_chat.id
     user = update.effective_user
-    logger.info(f"Received /check command from user {user.username} in chat {chat_id}")
+    
+    # Add detailed logging at entry point
+    logger.info(f"check_assignments_command started for user {user.username} in chat {chat_id}")
+    
     await context.bot.send_chat_action(chat_id=chat_id, action='typing')
 
     try:
-        config = context.application.user_data['config']
-        target_tz = context.application.user_data['target_tz']
-        days_ahead = config['DAYS_AHEAD']
+        # Get config from bot_data
+        config = context.application.bot_data.get('config')
+        logger.info(f"Retrieved config from bot_data: {config is not None}")
+        
+        target_tz = context.application.bot_data.get('target_tz')
+        logger.info(f"Retrieved timezone from bot_data: {target_tz is not None}")
 
-        await update.message.reply_text(f"🔍 Checking Canvas for assignments due in the next {days_ahead} days...", parse_mode=ParseMode.MARKDOWN_V2)
-        await context.bot.send_chat_action(chat_id=chat_id, action='typing') # Keep typing indicator
+        # Debug logging and validation
+        if config is None:
+            logger.error("Config missing from bot_data!")
+            logger.error(f"Available keys in bot_data: {list(context.application.bot_data.keys())}")
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text="⚠️ Internal error: Bot configuration missing\\. Please contact admin\\.", 
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            return
+
+        if target_tz is None:
+            logger.error("Target timezone not found in application context!")
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text="⚠️ Internal error: Bot timezone missing\\. Please contact admin\\.", 
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            return
+
+        logger.debug(f"Config retrieved in check_assignments_command: {config}")
+
+        # Safely get DAYS_AHEAD with fallback
+        days_ahead = config.get('DAYS_AHEAD')
+        if days_ahead is None:
+            logger.error("'DAYS_AHEAD' key missing from config in bot_data! Using fallback.")
+            days_ahead = 7
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text="⚠️ Configuration warning: Using default 7 days ahead\\.", 
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+
+        # Ensure integer type
+        try:
+            days_ahead = int(days_ahead)
+        except (ValueError, TypeError):
+            logger.error(f"Invalid non-integer value for DAYS_AHEAD in config: {days_ahead}")
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text="⚠️ Configuration error\\. Using default 7 days ahead\\.", 
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            days_ahead = 7
+
+        await update.message.reply_text(
+            f"🔍 Checking Canvas for assignments due in the next {days_ahead} days\\.\\.\\.", 
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        await context.bot.send_chat_action(chat_id=chat_id, action='typing')
 
         assignments = await fetch_upcoming_assignments(config, target_tz)
         message_text = format_assignment_message(assignments, days_ahead, target_tz)
 
         await context.bot.send_message(
-             chat_id=chat_id,
-             text=message_text,
-             parse_mode=ParseMode.MARKDOWN_V2,
-             disable_web_page_preview=True # Avoid large link previews
+            chat_id=chat_id,
+            text=message_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            disable_web_page_preview=True
         )
         logger.info(f"Sent assignment list to chat {chat_id} via /check command.")
 
     except (CanvasException, ConnectionError) as e:
-         logger.error(f"Canvas API or connection error during /check: {e}")
-         await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error connecting to Canvas: {escape_markdown_v2(str(e))}", parse_mode=ParseMode.MARKDOWN_V2)
+        error_msg = escape_markdown_v2(str(e))
+        logger.error(f"Canvas API or connection error during /check: {e}")
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text=f"⚠️ Error connecting to Canvas: {error_msg}", 
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
     except TelegramError as e:
-         logger.error(f"Telegram error sending /check response: {e}")
-         # Don't try to send another message if the first one failed potentially
+        logger.error(f"Telegram error sending /check response: {e}")
     except Exception as e:
-        logger.exception("Unhandled error during /check command") # Log full traceback
-        await context.bot.send_message(chat_id=chat_id, text=" Bummer, something went wrong while checking assignments\\. Please try again later or check the logs\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        logger.exception("Unhandled error during /check command")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Something went wrong\\. Please try again later\\.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
 
-
-async def scheduled_assignment_check(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def scheduled_assignment_check(context: CanvasContext) -> None:
     """Job function for the scheduler to send the daily summary."""
     job = context.job
-    config = context.application.user_data['config']
-    target_tz = context.application.user_data['target_tz']
+    config = context.application.bot_data['config']
+    target_tz = context.application.bot_data['target_tz']
     chat_id = config['TELEGRAM_CHAT_ID'] # Get configured chat ID for scheduled messages
     days_ahead = config['DAYS_AHEAD']
 
@@ -479,43 +540,42 @@ async def scheduled_assignment_check(context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as send_e:
              logger.error(f"Failed to send general error notification to Telegram: {send_e}")
 
-async def post_init(application: Application) -> None:
-    """Initialize application with configuration and timezone after creation.
-    
-    Args:
-        application: The telegram bot application instance to initialize
+def run_bot():
     """
+    Main function to run the bot. This is a non-async wrapper around the async main function
+    to properly handle event loops, especially on Windows.
+    """
+    # Set Windows event loop policy if on Windows
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())
+        logger.info("Windows event loop policy set.")
+    
+    # Create a new event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     try:
-        # Load and validate configuration
-        config = load_configuration()
-        target_tz = ZoneInfo(config['APP_TIMEZONE'])
-        
-        # Store config and timezone in application context
-        application.user_data['config'] = config
-        application.user_data['target_tz'] = target_tz
-        
-        logger.info(f"Application initialized with timezone {config['APP_TIMEZONE']}")
-    
-    except (EnvironmentError, ValueError) as e:
-        logger.error(f"Configuration error during post_init: {e}", exc_info=True)
-        raise RuntimeError(f"Failed to load configuration in post_init: {e}") from e
-    
+        # Run the main function in the event loop
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt caught. Shutting down...")
     except Exception as e:
-        logger.error(f"Unexpected error during post_init: {e}", exc_info=True)
-        raise RuntimeError(f"Unexpected error in post_init: {e}") from e
-
-# --- Main Execution Logic ---
+        logger.critical(f"Fatal error: {e}", exc_info=True)
+    finally:
+        # Clean up
+        loop.close()
+        logger.info("Event loop closed. Script execution finished.")
 
 async def main() -> None:
-    """Sets up the application, starts polling, and handles graceful shutdown."""
+    """Sets up the application and runs the bot using run_polling."""
     logger.info("Starting bot setup...")
-    application: Optional[Application] = None  # Define application here for broader scope in try/except/finally
+    application: Optional[Application] = None
 
     try:
-        # 1. Load initial configuration (use this directly in main)
-        temp_config = load_configuration()
-        bot_token = temp_config['TELEGRAM_BOT_TOKEN']
-        logger.info("Initial configuration loaded for setup.")
+        # 1. Load config needed for token
+        config = load_configuration()
+        bot_token = config['TELEGRAM_BOT_TOKEN']
+        logger.info("Initial configuration loaded.")
 
         # 2. Validate bot token
         logger.info("Validating Telegram Bot Token...")
@@ -523,26 +583,41 @@ async def main() -> None:
         await temp_bot.get_me()
         logger.info("Telegram Bot Token is valid.")
 
-        # 3. Build the application
-        logger.info("Building application instance...")
-        application = Application.builder().token(bot_token).post_init(post_init).build()
-        logger.info("Application instance built successfully.")
+        # 3. Create custom context types
+        logger.info("Setting up custom context types...")
+        canvas_context_types = ContextTypes(context=CanvasContext)
 
-        # 4. Use temp_config directly instead of retrieving from user_data
-        check_hour = temp_config['CHECK_HOUR']
-        check_minute = temp_config['CHECK_MINUTE']
-        app_timezone_str = temp_config['APP_TIMEZONE']
-        target_chat_id = temp_config['TELEGRAM_CHAT_ID']
-        target_tz = ZoneInfo(app_timezone_str)
+        # 4. Build the application with custom context types
+        logger.info("Building application instance with custom context types...")
+        application = Application.builder().token(bot_token).context_types(canvas_context_types).build()
+        logger.info(f"Application instance built (id: {id(application)})")
+
+        # 5. Store configuration in bot_data (which is mutable)
+        try:
+            target_tz = ZoneInfo(config['APP_TIMEZONE'])
+            application.bot_data['config'] = config
+            application.bot_data['target_tz'] = target_tz
+            logger.info("Populated application.bot_data with config and timezone.")
+            logger.info(f"Current application bot_data keys: {list(application.bot_data.keys())}")
+        except Exception as e:
+             logger.critical(f"Failed to populate bot_data: {e}", exc_info=True)
+             raise RuntimeError("Failed to set up application context") from e
+
+        # 6. Get scheduling info from config
+        check_hour = config['CHECK_HOUR']
+        check_minute = config['CHECK_MINUTE']
+        app_timezone_str = config['APP_TIMEZONE']
+        target_chat_id = config['TELEGRAM_CHAT_ID']
+        target_tz = application.bot_data['target_tz']
         logger.info("Configuration for scheduling retrieved.")
 
-        # 5. Register Command Handlers
+        # 7. Register Command Handlers
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("check", check_assignments_command))
         logger.info("Command handlers registered.")
 
-        # 6. Schedule daily check
+        # 8. Schedule daily check
         if target_chat_id and target_chat_id.lstrip('-').isdigit():
             logger.info("Setting up scheduled job...")
             application.job_queue.run_daily(
@@ -555,60 +630,36 @@ async def main() -> None:
         else:
             logger.warning("TELEGRAM_CHAT_ID not set or invalid - Scheduled daily notifications are DISABLED.")
 
-        # --- Explicit Initialization and Start ---
-        logger.info("Initializing application components...")
+        # 9. Run the bot using run_polling
+        logger.info("Starting bot polling using application.run_polling()...")
         await application.initialize()
-
-        logger.info("Starting application components (handlers, job queue)...")
         await application.start()
-
-        logger.info("Starting polling...")
-        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-
-        logger.info("Bot is now running. Press Ctrl+C to stop.")
-
-        # Keep the main coroutine alive until interrupted
-        stop_event = asyncio.Event()
-        await stop_event.wait()
-
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Received stop signal (KeyboardInterrupt/SystemExit). Initiating shutdown...")
-
+        await application.updater.start_polling()
+        
+        logger.info("Bot is running. Press Ctrl+C to stop.")
+        # Keep the bot running until interrupted
+        # This is a simple way to keep the main task alive
+        while True:
+            await asyncio.sleep(1)
+            
     except (EnvironmentError, ValueError, RuntimeError, KeyError) as e:
-        logger.critical(f"Initialization or configuration error: {e}", exc_info=True)
-
+        logger.critical(f"Setup or configuration error: {e}", exc_info=True)
+    except KeyboardInterrupt:
+        logger.info("Received KeyboardInterrupt. Shutting down...")
     except Exception as e:
         logger.critical(f"Unhandled error during bot execution: {e}", exc_info=True)
-
     finally:
-        logger.info("Shutdown sequence starting...")
+        # Proper shutdown sequence
         if application:
-            # Check if updater exists before trying to stop it
-            if application.updater:
-                logger.info("Stopping polling...")
-                await application.updater.stop()
-
-            # Check if application components are running before stopping them
-            if application.running:
-                logger.info("Stopping application components...")
-                await application.stop()
-
             logger.info("Shutting down application...")
-            await application.shutdown()
-            logger.info("Application shutdown complete.")
-        else:
-            logger.info("Application object not created, skipping shutdown steps.")
+            try:
+                await application.updater.stop()
+                await application.stop()
+                await application.shutdown()
+                logger.info("Application shutdown complete.")
+            except Exception as e:
+                logger.error(f"Error during application shutdown: {e}")
 
 # --- Main execution block ---
-if os.name == 'nt':
-    asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())
-    logger.info("Windows event loop policy set.")
-
-try:
-    asyncio.run(main())
-except KeyboardInterrupt:
-    logger.info("KeyboardInterrupt caught in outer block (likely during early setup).")
-except Exception as e:
-    logger.critical(f"Fatal error at top level: {e}", exc_info=True)
-finally:
-    logger.info("Script execution finished.")
+if __name__ == "__main__":
+    run_bot()
