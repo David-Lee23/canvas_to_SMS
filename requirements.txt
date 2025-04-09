@@ -1,7 +1,13 @@
-canvas-assignment-notifier
-├── src
-│   └── canvas_messenger.py
-├── .env.example
-├── .gitignore
-├── README.md
-└── requirements.txt
+# Core dependencies for the Assignment Notifier Script
+twilio>=8.0.0
+canvasapi>=3.0.0
+python-dotenv>=1.0.0
+apscheduler>=3.10.0
+
+# Standard library packages (included for reference, no need to install)
+# smtplib
+# os
+# logging
+# datetime
+# typing
+# zoneinfo (Python 3.9+)
