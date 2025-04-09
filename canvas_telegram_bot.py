@@ -46,7 +46,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 # Set higher logging level for httpx used by telegram-python-bot
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx") .setLevel(logging.WARNING)
 logger = logging.getLogger(__name__) # Use a specific logger for this module
 
 # Environment variable names and defaults
@@ -103,10 +103,24 @@ def load_configuration() -> Dict[str, Any]:
     return config
 
 def escape_markdown_v2(text: str) -> str:
-    """Escapes characters for Telegram MarkdownV2 parse mode."""
-    # Characters to escape: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    """
+    Escapes characters for Telegram MarkdownV2 parse mode.
+    All characters that need escaping in MarkdownV2 are properly handled.
+    """
+    if not text:
+        return ""
+        
+    # Characters that need escaping in MarkdownV2
     escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+    
+    # Escape backslash first to avoid double escaping
+    text = text.replace('\\', '\\\\')
+    
+    # Escape all other special characters
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+        
+    return text
 
 def parse_iso_datetime(date_string: Optional[str], target_tz: ZoneInfo) -> Optional[datetime]:
     """
@@ -299,7 +313,6 @@ async def fetch_upcoming_assignments(
     logger.info(f"Found {len(upcoming_assignments)} assignments due within the next {days_ahead} days.")
     return upcoming_assignments
 
-
 # --- Message Formatting ---
 
 def format_assignment_message(
@@ -310,16 +323,15 @@ def format_assignment_message(
         return f"✅ No assignments due in the next {days_ahead} days\\." # Escape the period
 
     now_local = datetime.now(target_tz)
-    message_parts = [f"*Upcoming Assignments (Next {days_ahead} Days):*"]
+    message_parts = [f"*Upcoming Assignments \\(Next {days_ahead} Days\\):*"]
 
     for a in assignments:
         due_date = a['due_date_local']
         assignment_name = escape_markdown_v2(a['assignment_name'])
         course_name_full = escape_markdown_v2(a['course_name'])
         # Try to shorten course name intelligently
-        course_parts = course_name_full.split(' - ')
-        course_short = escape_markdown_v2(course_parts[-1][:25]) # Take last part, limit length
-
+        course_parts = course_name_full.split(' \\- ')
+        course_short = course_parts[-1][:25] if len(course_parts) > 1 else course_name_full[:25]
 
         # Format day: Today, Tomorrow, DayName
         if due_date.date() == now_local.date():
@@ -337,12 +349,15 @@ def format_assignment_message(
         # Add estimate if available
         est_str = ""
         if a.get('estimated_hours') is not None:
-            est_str = f" \\| Est: *{a['estimated_hours']:.1f} hrs*" # Bold estimate
+            rounded_hours = int(round(a['estimated_hours']))
+            est_str = f" \\| Est: *{rounded_hours} hrs*" # Rounded to integer
 
         # Create link if URL exists
-        link = f"[Link]({escape_markdown_v2(a['html_url'])})" if a['html_url'] else "No Link"
-        link = escape_markdown_v2(link) if not a['html_url'] else link # Escape "No Link" text only
-
+        link_text = "Link"
+        if a['html_url']:
+            link = f"[{link_text}]({a['html_url']})"
+        else:
+            link = "No Link"
 
         # Combine parts
         # Using MarkdownV2 requires escaping ., -, etc.
@@ -357,7 +372,6 @@ def format_assignment_message(
     # Join with double newline, respecting Telegram's message length limits implicitly
     # Telegram bot library handles splitting if needed, but good practice to keep reasonable
     return "\n\n".join(message_parts)
-
 
 # --- Telegram Bot Commands and Logic ---
 
@@ -481,6 +495,19 @@ async def check_assignments_command(update: Update, context: CanvasContext) -> N
         )
     except TelegramError as e:
         logger.error(f"Telegram error sending /check response: {e}")
+        # Try to send a simpler message if there was a formatting error
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Error formatting message\\. Please try again\\.",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+        except:
+            # If even that fails, try plain text
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Error formatting message. Please try again."
+            )
     except Exception as e:
         logger.exception("Unhandled error during /check command")
         await context.bot.send_message(
@@ -488,7 +515,6 @@ async def check_assignments_command(update: Update, context: CanvasContext) -> N
             text="⚠️ Something went wrong\\. Please try again later\\.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
-
 async def scheduled_assignment_check(context: CanvasContext) -> None:
     """Job function for the scheduler to send the daily summary."""
     job = context.job
