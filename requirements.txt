@@ -1,9 +1,9 @@
 
-canvasapi>=2.0.0
-python-dotenv>=1.0.0
-apscheduler>=3.10.1
-ollama>=0.1.0
-zoneinfo;python_version<"3.9"
-smtplib3>=0.0.1
-email-validator>=2.0.0
-typing-extensions>=4.5.0
+canvasapi
+python-dotenv
+apscheduler
+ollama
+zoneinfo;python_version
+smtplib3
+email-validator
+typing-extensions
