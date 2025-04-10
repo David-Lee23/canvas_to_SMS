@@ -2,5 +2,5 @@ canvasapi
 python-dotenv
 APScheduler
 ollama
-# zoneinfo is built-in for Python 3.9+
-# smtplib, email.mime.text, logging, datetime, os, re, time, typing, zoneinfo are standard libraries
+zoneinfo # is built-in for Python 3.9+
+smtplib, email.mime.text, logging, datetime, os, re, time, typing, zoneinfo are standard libraries
