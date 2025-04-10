@@ -1,4 +1,4 @@
-# Canvas Assignment Notifier Bot (Telegram Version)
+# Canvas Assignment Notifier Bot (AI Telegram Version)
 
 This script connects to the Canvas LMS API to fetch upcoming assignments, uses a local AI model (via Ollama) to estimate completion times and summarize descriptions, and delivers notifications via a Telegram bot. It supports both scheduled daily summaries and on-demand checks using bot commands, including the ability to request detailed information about specific assignments.
 
