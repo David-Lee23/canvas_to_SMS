@@ -1,19 +1,13 @@
-# Core dependencies
-python-telegram-bot
 canvasapi
 python-dotenv
-APScheduler
+python-telegram-bot # Includes necessary extensions like CommandHandler, JobQueue etc.
 ollama
-
-# Timezone support
-tzdata  # Required for ZoneInfo on Windows
-pytz    # Additional timezone support
-
-# Utility packages
-aiohttp  # For async HTTP requests
-certifi  # For SSL certificate verification
-typing-extensions
-
-# Optional but recommended
-python-dateutil  # For robust date parsing
-urllib3  # Required by several dependencies
+zoneinfo # is built-in for Python 3.9+
+asyncio 
+logging
+datetime
+os
+re
+html
+time
+typing
