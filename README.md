@@ -1,134 +1,104 @@
 # Canvas Assignment Notifier Bot (Telegram Version)
 
-## Overview
-
-The Canvas Assignment Notifier is a Python script that connects to the Canvas API to fetch upcoming assignments, uses AI (via Ollama) to estimate completion times, and delivers notifications via a Telegram bot. It supports both scheduled daily summaries and on-demand checks using bot commands.
+This script connects to the Canvas LMS API to fetch upcoming assignments, uses a local AI model (via Ollama) to estimate completion times, and delivers notifications via a Telegram bot. It supports both scheduled daily summaries and on-demand checks using bot commands.
 
 ## Features
 
-- Fetches upcoming assignments from the Canvas LMS API.
-- Uses a local AI model (e.g., Mistral via Ollama) to estimate assignment completion times.
-- Sends summaries via Telegram with Markdown formatting (bold text, links).
-- **Interactive:** Check assignments anytime using the `/check` command.
-- **Scheduled Notifications:** Receive a daily summary at a configured time.
-- Configurable lookahead period (`DAYS_AHEAD`), check time (`CHECK_HOUR`, `CHECK_MINUTE`), and timezone (`APP_TIMEZONE`).
-- Handles Canvas API errors and provides informative feedback.
-- Asynchronous design using `asyncio` and `python-telegram-bot`.
+*   **Fetches Upcoming Assignments:** Retrieves assignments due within a configurable number of days from the Canvas API using asynchronous calls.
+*   **AI Time Estimation:** Uses a configured Ollama model (default: `mistral`) to analyze assignment descriptions and estimate completion time.
+*   **Telegram Bot Interface:**
+    *   Provides commands (`/start`, `/help`, `/check`) for user interaction.
+    *   Sends well-formatted summaries using Telegram's MarkdownV2.
+    *   Handles `/start` to welcome users and provide their chat ID.
+*   **Scheduled Daily Notifications:** Sends a summary of upcoming assignments daily at a configured time to a specific chat ID.
+*   **Timezone Aware:** Correctly handles due dates and scheduling using configurable timezones (defaults to `America/New_York`).
+*   **Asynchronous:** Built using `asyncio` and `python-telegram-bot`'s async capabilities for efficient operation.
+*   **Configurable:** Uses environment variables for all sensitive information and settings (API keys, bot token, chat ID, schedule, model, etc.).
+*   **Robust:** Includes error handling for Canvas API, Telegram API, AI estimation, and configuration issues, with detailed logging.
+*   **MarkdownV2 Formatting:** Properly escapes text for reliable Markdown rendering in Telegram.
 
-## Requirements
+## Prerequisites
 
-- Python 3.9+
-- Canvas API Access Token
-- Ollama installed and running with a model (e.g., `ollama run mistral`)
-- Telegram Account and a Telegram Bot Token
+*   **Python 3.9+:** Required for the `zoneinfo` module and modern `asyncio` features.
+*   **Canvas API Access Token:** Generate an API token from your Canvas account settings.
+*   **Telegram Bot Token:** Create a bot using Telegram's @BotFather and get its API token.
+*   **Telegram Chat ID:** You need the ID of the chat (user, group, or channel) where the bot will send *scheduled* messages. The bot will print your user chat ID when you first `/start` it. For groups, you might need other methods to find the ID (e.g., adding a raw data bot temporarily).
+*   **Ollama Installed and Running:** Ollama must be installed and running on the machine where the script executes.
+*   **Ollama Model Pulled:** The AI model specified in the environment variables (default: `mistral`) must be pulled. Run `ollama pull mistral` (or your chosen model name).
 
-## Setup Instructions
+## Setup
 
-1.  **Clone the repository:**
+1.  **Clone the Repository (or download the script):**
     ```bash
-    git clone https://github.com/yourusername/canvas-assignment-notifier.git # Replace with your repo URL
-    cd canvas-assignment-notifier
+    git clone <your-repo-url> # Or just save the script as canvas_telegram_bot.py
+    cd <your-repo-directory>
     ```
 
-2.  **Create a virtual environment (recommended):**
+2.  **Create a Virtual Environment (Recommended):**
     ```bash
     python -m venv venv
     source venv/bin/activate  # On Windows use `venv\Scripts\activate`
     ```
 
-3.  **Install dependencies:**
+3.  **Install Dependencies:**
     ```bash
     pip install -r requirements.txt
     ```
 
-4.  **Create a Telegram Bot:**
-    *   Open Telegram and search for `@BotFather`.
-    *   Start a chat with BotFather and send `/newbot`.
-    *   Follow the instructions to choose a name and username for your bot (e.g., `MyCanvasNotifierBot`).
-    *   BotFather will give you an **HTTP API token**. Copy this token.
+4.  **Configure Environment Variables:**
+    *   Copy the example environment file:
+        ```bash
+        cp .env.example .env
+        ```
+    *   **Edit the `.env` file** with your actual credentials and settings. See the comments in `.env.example` for details on each variable.
+        *   `CANVAS_API_URL`: Your institution's Canvas base URL.
+        *   `CANVAS_API_TOKEN`: Your Canvas API token.
+        *   `TELEGRAM_BOT_TOKEN`: Your Telegram bot's API token from @BotFather.
+        *   `TELEGRAM_CHAT_ID`: **Required for scheduled messages.** The chat ID where daily summaries will be sent. You can get your *user* chat ID by running the bot and sending `/start`.
+        *   `DAYS_AHEAD`: (Optional) How many days ahead to check for assignments (default: 7).
+        *   `CHECK_HOUR`: (Optional) Hour (0-23) in your specified `APP_TIMEZONE` to run the *scheduled* check (default: 8).
+        *   `CHECK_MINUTE`: (Optional) Minute (0-59) to run the *scheduled* check (default: 0).
+        *   `APP_TIMEZONE`: (Optional) Your local timezone name (e.g., `America/New_York`, `Europe/London`). See [List of tz database time zones](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) (use the 'TZ database name' column). Default: `America/New_York`.
+        *   `OLLAMA_MODEL`: (Optional) The Ollama model to use for time estimation (default: `mistral`).
 
-5.  **Set up Environment Variables:**
-    *   Create a `.env` file in the root directory of the project.
-    *   Copy the contents of `.env.example` (if provided) or add the following, replacing placeholder values:
+    **Important:** Never commit your actual `.env` file to version control. Add `.env` to your `.gitignore` file.
 
-    ```dotenv
-    # --- Canvas Settings ---
-    CANVAS_API_URL=https://your.instructure.com # Your Canvas instance URL
-    CANVAS_API_TOKEN=your_canvas_api_token # Generate this in Canvas Account Settings
+5.  **Ensure Ollama is Running:**
+    Make sure the Ollama service/application is running and the model specified in your `.env` file is available locally.
 
-    # --- Telegram Settings ---
-    TELEGRAM_BOT_TOKEN=PASTE_YOUR_BOT_TOKEN_HERE # From BotFather
-    TELEGRAM_CHAT_ID= # Leave blank initially
+## Running the Bot
 
-    # --- Scheduling & Logic Settings ---
-    DAYS_AHEAD=7          # Optional: default is 7
-    CHECK_HOUR=8          # Optional: default is 8 AM (in APP_TIMEZONE)
-    CHECK_MINUTE=0        # Optional: default is on the hour
-    APP_TIMEZONE=America/New_York # Your local timezone (see list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
-
-    # --- Optional: AI Settings ---
-    # OLLAMA_MODEL=mistral # Default model used for estimation
+1.  **Activate your virtual environment** (if you created one):
+    ```bash
+    source venv/bin/activate # Or venv\Scripts\activate on Windows
+    ```
+2.  **Run the Python script:**
+    ```bash
+    python canvas_telegram_bot.py
     ```
 
-6.  **Run the Bot (Initial Run to get Chat ID):**
-    *   Ensure Ollama is running (`ollama serve` or the Ollama desktop app).
-    *   Run the script:
-        ```bash
-        python canvas_telegram_bot.py # Or python src/canvas_telegram_bot.py if you have a src layout
-        ```
-    *   Open Telegram and find the bot you created.
-    *   Send the `/start` command to your bot.
-    *   **Check the console output** where you ran the Python script. It should print a line like:
-        `--- User YourUsername started bot in Chat ID: 123456789 ---`
-    *   Copy this numeric Chat ID.
-    *   Stop the script (Ctrl+C).
+The script will:
+1.  Load configuration and connect to Telegram.
+2.  Register command handlers (`/start`, `/help`, `/check`).
+3.  If `TELEGRAM_CHAT_ID` is set, schedule the daily check based on `CHECK_HOUR`, `CHECK_MINUTE`, and `APP_TIMEZONE`.
+4.  Start polling for updates from Telegram.
 
-7.  **Update `.env` with Chat ID:**
-    *   Open your `.env` file again.
-    *   Paste the copied Chat ID into the `TELEGRAM_CHAT_ID` variable:
-        ```dotenv
-        TELEGRAM_CHAT_ID=123456789
-        ```
-    *   Save the `.env` file. This ID is needed for the bot to send you *scheduled* messages.
+The bot needs to remain running in the foreground (or as a background process/service using tools like `screen`, `tmux`, or systemd) to respond to commands and execute the scheduled job.
 
-8.  **Run the Bot Permanently:**
-    *   Now run the script again:
-        ```bash
-        python canvas_telegram_bot.py
-        ```
-    *   The bot is now running, listening for commands, and will send scheduled notifications. You'll likely want to run this using a process manager like `systemd`, `supervisor`, `docker`, or a screen/tmux session for long-term operation.
+## Interacting with the Bot
 
-## Usage
+*   Find your bot on Telegram (using the username you set with @BotFather).
+*   Send `/start` to initiate interaction. The bot will reply with a welcome message and your chat ID (useful for the `TELEGRAM_CHAT_ID` environment variable if you want scheduled messages sent directly to you).
+*   Send `/help` to see available commands.
+*   Send `/check` to manually trigger a check for upcoming assignments. The result will be sent to the chat where you issued the command.
+*   If configured, the bot will automatically send a summary to the `TELEGRAM_CHAT_ID` at the scheduled time.
 
-Interact with your bot on Telegram:
+## Troubleshooting
 
--   `/start`: Get a welcome message and confirm the bot is working. Displays your Chat ID.
--   `/check`: Manually trigger a check for upcoming assignments. The bot will reply with the current list.
--   `/help`: Show the list of available commands.
-
-The bot will automatically send a summary of upcoming assignments daily at the time specified by `CHECK_HOUR` and `CHECK_MINUTE` in your `APP_TIMEZONE`.
-
-## AI Time Estimation Notes
-
--   The quality of the time estimate depends heavily on the AI model (Mistral is generally decent) and the quality/detail of the assignment description in Canvas.
--   Estimates are approximate and intended as a planning aid.
--   If Ollama is unreachable or the AI fails to provide a valid number, the estimate will be omitted for that assignment.
-
-## Deployment (Optional)
-
-To run the bot 24/7 without keeping your local machine on, consider deploying it to:
-
--   **Cloud Virtual Machine:** (AWS EC2, Google Cloud Compute Engine, Azure VM, Oracle Cloud Free Tier)
--   **Platform-as-a-Service (PaaS):** (Heroku, Render, Fly.io, Railway.app)
--   **Raspberry Pi:** A low-power device you can run at home.
--   **Containerization:** Use Docker for consistent deployment across environments.
-
-Ensure Ollama is accessible to the deployed bot (either running on the same machine or accessible over a network).
-
-## Contributing
-
-Contributions, issues, and feature requests are welcome! Feel free to check [issues page](https://github.com/yourusername/canvas-assignment-notifier/issues).
-
-## License
-
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+*   **Bot unresponsive:** Check script logs for errors. Ensure the script is running. Verify `TELEGRAM_BOT_TOKEN` is correct. Check internet connectivity.
+*   **Canvas Errors:** Verify `CANVAS_API_URL` and `CANVAS_API_TOKEN`. Check Canvas status and token permissions.
+*   **Ollama Errors:** Ensure Ollama service is running. Verify the `OLLAMA_MODEL` in `.env` is correct and pulled (`ollama list`). Check Ollama logs.
+*   **Scheduled Messages Not Sending:** Ensure `TELEGRAM_CHAT_ID` is set correctly in `.env` and the script was restarted after setting it. Verify the bot has permission to send messages in that chat (especially for groups/channels). Check timezone settings (`APP_TIMEZONE`) and scheduled time (`CHECK_HOUR`, `CHECK_MINUTE`).
+*   **MarkdownV2 Errors:** The script tries to escape characters, but complex assignment names/descriptions might occasionally cause issues. Check logs for `TelegramError` related to parsing.
+*   **`AttributeError: 'NoneType' object has no attribute 'message'` or similar on /check:** This can happen if the bot's internal context isn't set up correctly, often on the very first run or after a restart. Check logs for errors during startup, especially around `bot_data` population. Ensure configuration loads correctly.
+*   **Windows Event Loop Policy:** The script includes a fix for `asyncio` on Windows. If you encounter `RuntimeError: Event loop is closed` on Windows, ensure this policy is being set correctly.
