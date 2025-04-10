@@ -1,13 +1,4 @@
-# Core dependencies for the Assignment Notifier Script
-twilio>=8.0.0
-canvasapi>=3.0.0
-python-dotenv>=1.0.0
-apscheduler>=3.10.0
-
-# Standard library packages (included for reference, no need to install)
-# smtplib
-# os
-# logging
-# datetime
-# typing
-# zoneinfo (Python 3.9+)
+# Core dependencies required for the Assignment Notifier Script
+canvasapi>=3.2.0        # For interacting with Canvas API
+python-dotenv>=1.0.0    # For loading environment variables from .env file
+apscheduler>=3.10.0     # For scheduling the assignment checks
