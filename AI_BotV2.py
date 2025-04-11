@@ -37,6 +37,7 @@ from telegram.ext import (
 from telegram.error import TelegramError
 from telegram.constants import ParseMode # Import ParseMode constant
 from telegram.request import HTTPXRequest  # Add this new import
+import json # Add new import for JSON handling
 
 # --- Configuration ---
 
@@ -618,6 +619,55 @@ def format_assignment_details(assignment: Dict[str, Any], target_tz: ZoneInfo) -
 
 # --- Telegram Bot Commands and Logic ---
 
+# --- Constants for Context Management ---
+MAX_ASSIGNMENTS_IN_CONTEXT = 15 # Limit how many assignments we inject into the prompt
+MAX_HISTORY_MESSAGES = 6 # Keep last N messages (user + bot)
+
+def format_assignments_for_prompt(assignments: Dict[int, Dict[str, Any]]) -> str:
+    """Formats the assignment list concisely for the AI prompt."""
+    if not assignments:
+        return "No assignments were recently listed."
+
+    lines = ["Assignments recently listed (use index [N] to refer):"]
+    count = 0
+    for index, a in assignments.items():
+        if count >= MAX_ASSIGNMENTS_IN_CONTEXT:
+            lines.append(f"... (and {len(assignments) - count} more)")
+            break
+        name = a.get('assignment_name', 'Unnamed')
+        course = a.get('course_name', 'Unknown Course')
+        due_str = "No due date"
+        if a.get('due_date_local'):
+            due_str = a['due_date_local'].strftime('%a, %b %d %I:%M%p')
+
+        lines.append(f"  [{index}] {name} ({course}) - Due: {due_str}")
+        count += 1
+    return "\n".join(lines)
+
+def format_history_for_prompt(history: List[Dict[str, str]]) -> str:
+    """Formats the message history for the AI prompt."""
+    if not history:
+        return "No recent message history available."
+
+    lines = ["Recent conversation history:"]
+    for msg in history:
+        role = msg.get('role', 'unknown').capitalize()
+        content = msg.get('content', '').strip()
+        lines.append(f"  {role}: {content}")
+    return "\n".join(lines)
+
+def add_message_to_history(context: CanvasContext, role: str, content: str):
+    """Adds a message to the user's chat history, keeping it trimmed."""
+    if 'message_history' not in context.user_data:
+        context.user_data['message_history'] = []
+
+    history = context.user_data['message_history']
+    history.append({'role': role, 'content': content})
+
+    # Keep history trimmed
+    if len(history) > MAX_HISTORY_MESSAGES:
+        context.user_data['message_history'] = history[-MAX_HISTORY_MESSAGES:]
+
 async def start_command(update: Update, context: CanvasContext) -> None:
     """Sends a welcome message when the /start command is issued."""
     user = update.effective_user
@@ -626,6 +676,11 @@ async def start_command(update: Update, context: CanvasContext) -> None:
 
     # Log the chat ID - useful for setting TELEGRAM_CHAT_ID in .env
     print(f"--- User {user.username} started bot in Chat ID: {chat_id} ---")
+
+    # Clear any previous context for this user on /start
+    context.user_data.pop('last_assignments', None)
+    context.user_data.pop('message_history', None)
+    logger.info(f"Cleared user_data context for user {user.id} on /start.")
 
     await update.message.reply_html(
         f"Hello {user.mention_html()}! 👋\n\n"
@@ -637,6 +692,7 @@ async def start_command(update: Update, context: CanvasContext) -> None:
         f"/help - Show help information\n\n"
         f"After using /check, you can also send 'details N' to get more information about a specific assignment."
     )
+    add_message_to_history(context, 'bot', "Sent welcome message and command list.")
 
 async def help_command(update: Update, context: CanvasContext) -> None:
     """Sends a help message when the /help command is issued."""
@@ -728,49 +784,59 @@ async def check_assignments_command(update: Update, context: CanvasContext) -> N
 
 # --- NEW: Ask Command ---
 async def ask_command(update: Update, context: CanvasContext) -> None:
-    """Handles the /ask command, sending the question to Ollama."""
+    """Handles the /ask command, injecting context (assignments, history) into the prompt."""
     chat_id = update.effective_chat.id
     user = update.effective_user
-
-    # Extract the question text after the command
     question = " ".join(context.args).strip()
 
-    logger.info(f"Received /ask command from user {user.username} (ID: {user.id}) in chat {chat_id}. Question: '{question}'")
+    # Add user's question to history FIRST
+    add_message_to_history(context, 'user', f"/ask {question}")
 
     if not question:
-        await update.message.reply_text(
+        reply_text = (
             "❓ Please provide a question after the `/ask` command\\.\n"
-            "Example: `/ask explain the difference between RAM and ROM`",
-            parse_mode=ParseMode.MARKDOWN_V2
+            "Example: `/ask what is assignment [1] about?`"
         )
+        await update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN_V2)
+        add_message_to_history(context, 'bot', "Asked user to provide a question for /ask.")
         return
 
-    # Send a "thinking" message
-    await update.message.reply_text("🤖 Thinking...")
+    await update.message.reply_text("🤖 Thinking... (using context if available)")
+    add_message_to_history(context, 'bot', "Thinking...")
 
-    # Get configuration
     config = context.application.bot_data.get('config')
     if not config:
-        logger.error("Missing configuration in bot_data for /ask")
-        await update.message.reply_text("⚠️ Bot configuration error. Cannot process request.")
+        error_reply = "⚠️ Bot configuration error. Cannot process request."
+        await update.message.reply_text(error_reply)
+        add_message_to_history(context, 'bot', error_reply)
         return
 
-    ollama_model = config.get('OLLAMA_MODEL', 'mistral') # Use default if not set
+    ollama_model = config.get('OLLAMA_MODEL', 'mistral')
+
+    # Retrieve Context
+    last_assignments = context.user_data.get('last_assignments', {})
+    message_history = context.user_data.get('message_history', [])
+    history_for_prompt = message_history[:-2] if len(message_history) >= 2 else []
+
+    # Format Context for Prompt
+    assignment_context_str = format_assignments_for_prompt(last_assignments)
+    history_context_str = format_history_for_prompt(history_for_prompt)
+
+    # Construct Enhanced Prompt
+    prompt_lines = [
+        "You are a helpful college AI assistant integrated into a Telegram bot.",
+        "You can answer general questions, but also questions about specific Canvas assignments recently listed by the bot or about the recent conversation.",
+        "--- Assignment Context ---",
+        assignment_context_str,
+        "--- Conversation History ---",
+        history_context_str,
+        "--- Current Question ---",
+        "Please answer the student's following question based on the context provided above (assignments, history) if relevant, or using your general knowledge otherwise:",
+        question
+    ]
+    prompt_content = "\n\n".join(prompt_lines)
 
     try:
-        # Construct the prompt for Ollama
-        # Use the bonus prompt template for better context
-        prompt_content = (
-            f"You are a helpful college AI assistant. A student needs help with the following:\n\n"
-            f"Student's Question: {question}\n\n"
-            f"Please provide a clear, helpful, and concise answer. If the question seems academic "
-            f"(e.g., explaining a concept, helping with a study question), tailor your response accordingly. "
-            f"If it requires steps, break them down."
-        )
-
-        logger.debug(f"Sending prompt to Ollama for /ask command: {prompt_content[:200]}...") # Log snippet
-
-        # Use asyncio.to_thread for potentially blocking Ollama call
         response = await asyncio.to_thread(
             ollama.chat,
             model=ollama_model,
@@ -778,24 +844,16 @@ async def ask_command(update: Update, context: CanvasContext) -> None:
         )
 
         answer = response["message"]["content"].strip()
-        logger.info(f"Received AI response for /ask command from user {user.username}. Length: {len(answer)}")
+        if len(answer) > 4000:
+            answer = answer[:4000] + "..."
 
-        # Send the answer back to the user
-        # Note: Telegram has message length limits (~4096 chars).
-        # For very long answers, splitting might be needed, but start simple.
-        if len(answer) > 4000: # Basic length check
-             logger.warning(f"AI answer for /ask is very long ({len(answer)} chars), truncating.")
-             answer = answer[:4000] + "..."
-
-        # Send reply - Use plain text by default unless you know the AI reliably produces Markdown
         await update.message.reply_text(answer)
+        add_message_to_history(context, 'bot', answer)
 
     except Exception as e:
-        logger.error(f"Ollama error or other exception during /ask command: {e}", exc_info=True)
-        await update.message.reply_text(
-            "⚠️ Sorry, I encountered an error while trying to answer your question. Please try again later.",
-            parse_mode=ParseMode.MARKDOWN_V2 # Keep error message formatted
-        )
+        error_reply = "⚠️ Sorry, I encountered an error while trying to answer your question. Please try again later."
+        await update.message.reply_text(error_reply)
+        add_message_to_history(context, 'bot', error_reply)
 # --- END NEW: Ask Command ---
 
 async def handle_text_message(update: Update, context: CanvasContext) -> None:
@@ -956,14 +1014,18 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error("Exception while handling an update:", exc_info=context.error)
 
     try:
+        if isinstance(context, CanvasContext):
+            error_text = f"Error processing update: {context.error}"
+            add_message_to_history(context, 'bot', error_text[:500])
+
         if isinstance(update, Update) and update.effective_chat:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="🤖 Oops\\! Something went wrong processing your request\\. The error has been logged\\.",
+                text="🤖 Oops\\! Something went wrong processing your request\\. The technical details have been logged\\.",
                 parse_mode=ParseMode.MARKDOWN_V2
             )
     except Exception as e:
-        logger.error(f"Exception while sending error notification: {e}", exc_info=True)
+        logger.error(f"Exception in error handler: {e}", exc_info=True)
 
 def run_bot():
     """
