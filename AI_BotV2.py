@@ -620,28 +620,44 @@ def format_assignment_details(assignment: Dict[str, Any], target_tz: ZoneInfo) -
 # --- Telegram Bot Commands and Logic ---
 
 # --- Constants for Context Management ---
-MAX_ASSIGNMENTS_IN_CONTEXT = 15 # Limit how many assignments we inject into the prompt
-MAX_HISTORY_MESSAGES = 6 # Keep last N messages (user + bot)
+MAX_ASSIGNMENTS_IN_CONTEXT = 10  # Reduced slightly as descriptions add length
+MAX_HISTORY_MESSAGES = 6  # Keep existing value
+MAX_DESC_SNIPPET_LENGTH = 150  # Max characters for description snippet in prompt
 
 def format_assignments_for_prompt(assignments: Dict[int, Dict[str, Any]]) -> str:
-    """Formats the assignment list concisely for the AI prompt."""
+    """
+    Formats the assignment list concisely for the AI prompt,
+    including a snippet of the cleaned description.
+    """
     if not assignments:
         return "No assignments were recently listed."
 
-    lines = ["Assignments recently listed (use index [N] to refer):"]
+    lines = ["Assignments recently listed (use index [N], name, or course to refer):"]
     count = 0
     for index, a in assignments.items():
         if count >= MAX_ASSIGNMENTS_IN_CONTEXT:
             lines.append(f"... (and {len(assignments) - count} more)")
             break
+
         name = a.get('assignment_name', 'Unnamed')
         course = a.get('course_name', 'Unknown Course')
         due_str = "No due date"
         if a.get('due_date_local'):
-            due_str = a['due_date_local'].strftime('%a, %b %d %I:%M%p')
+            due_str = a['due_date_local'].strftime('%a, %b %d %I:%M%p')  # Concise format
 
-        lines.append(f"  [{index}] {name} ({course}) - Due: {due_str}")
+        # Add Description Snippet
+        desc_snippet = ""
+        description_html = a.get('description')
+        if description_html:
+            clean_desc = clean_html(description_html)
+            if clean_desc:
+                if len(clean_desc) > MAX_DESC_SNIPPET_LENGTH:
+                    clean_desc = clean_desc[:MAX_DESC_SNIPPET_LENGTH] + "..."
+                desc_snippet = f" | Desc: {clean_desc}"
+
+        lines.append(f"  [{index}] {name} ({course}) - Due: {due_str}{desc_snippet}")
         count += 1
+
     return "\n".join(lines)
 
 def format_history_for_prompt(history: List[Dict[str, str]]) -> str:
